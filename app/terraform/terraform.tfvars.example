@@ -1,0 +1,18 @@
+# AWS Configuration
+aws_region = "eu-south-2"
+
+# Project Configuration
+project_name = "tfm-slm"
+
+# EC2 Configuration
+instance_type = "g7e.2xlarge"
+ssh_key_name  = "tfm-slm"
+
+# Docker Configuration
+docker_image_tag = "latest"
+
+# Spot Instance Configuration (optional, for cost savings)
+spot_price = "1.50"
+
+# Deployment Mode (train or inference)
+deployment_mode = "train"
