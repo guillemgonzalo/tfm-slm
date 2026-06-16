@@ -1,0 +1,59 @@
+[project]
+name = "tfm-slm"
+version = "0.1.0"
+description = "slm for tfm (transformers and gru)"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "boto3>=1.43.6",
+    "datasets>=4.8.5",
+    "httpx>=0.28.1",
+    "huggingface-hub>=1.13.0",
+    "pydantic>=2.13.3",
+    "pydantic-settings>=2.14.0",
+    "torch>=2.11.0",
+    "tqdm>=4.67.3",
+    "transformers>=5.8.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+]
+
+[project.scripts]
+tfm-slm = "app.main:main"
+tfm-slm-inference = "app.inference:main"
+tfm-slm-api = "app.chat.api:main"
+tfm-slm-benchmark = "app.benchmarking:main"
+tfm-slm-deploy = "deploy:main"
+
+
+[tool.uv]
+package = true
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+src = ["app"]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "S", "UP"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.ruff.format]
+line-ending = "auto"
+
+[tool.ty]
+
+[tool.ty.rules]
+invalid-argument-type = "ignore"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
+]
