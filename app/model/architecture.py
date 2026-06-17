@@ -54,40 +54,51 @@ class FlashAttention(nn.Module):
         self.Wv = nn.Linear(hidden_size, hidden_size)
         self.out_proj = nn.Linear(hidden_size, hidden_size)
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attn_mask=None):
+    def forward(self, q, k, v, past_kv=None, use_cache=False):
         batch_size, seq_len_q, _ = q.shape
-        _, seq_len_kv, _ = k.shape
 
         q = self.Wq(q).view(batch_size, seq_len_q, self.num_heads, self.head_dim)
-        k = self.Wk(k).view(batch_size, seq_len_kv, self.num_heads, self.head_dim)
-        v = self.Wv(v).view(batch_size, seq_len_kv, self.num_heads, self.head_dim)
+        k = self.Wk(k).view(batch_size, seq_len_q, self.num_heads, self.head_dim)
+        v = self.Wv(v).view(batch_size, seq_len_q, self.num_heads, self.head_dim)
+
+        # KV-cache: prepend previously computed keys/values (layout [b, seq, heads, head_dim])
+        if past_kv is not None:
+            past_k, past_v = past_kv
+            k = torch.cat([past_k, k], dim=1)
+            v = torch.cat([past_v, v], dim=1)
+
+        present = (k, v) if use_cache else None
+        seq_len_kv = k.shape[1]
 
         if _HAS_FLASH_ATTN:
-            q_fa = q.to(torch.bfloat16)
-            k_fa = k.to(torch.bfloat16)
-            v_fa = v.to(torch.bfloat16)
+            # flash_attn causal=True uses bottom-right alignment, correct for q_len <= kv_len
             out = flash_attn_func(
-                q_fa, k_fa, v_fa, dropout_p=self.dropout if self.training else 0.0, causal=True
+                q.to(torch.bfloat16),
+                k.to(torch.bfloat16),
+                v.to(torch.bfloat16),
+                dropout_p=self.dropout if self.training else 0.0,
+                causal=True,
             )
             out = out.contiguous().view(batch_size, seq_len_q, self.hidden_size)
         else:
-            # Fallback: scaled_dot_product_attention (PyTorch native, works on Mac/CPU)
-            # scaled_dot_product_attention expects [batch, num_heads, seq, head_dim]
-            q_t = q.transpose(1, 2)  # [batch, num_heads, seq_q, head_dim]
-            k_t = k.transpose(1, 2)  # [batch, num_heads, seq_kv, head_dim]
-            v_t = v.transpose(1, 2)  # [batch, num_heads, seq_kv, head_dim]
+            # Fallback: scaled_dot_product_attention expects [batch, heads, seq, head_dim]
+            q_t = q.transpose(1, 2)
+            k_t = k.transpose(1, 2)
+            v_t = v.transpose(1, 2)
 
-            attn_mask_causal = torch.triu(
-                torch.ones(seq_len_q, seq_len_kv, device=q.device, dtype=torch.bool),
-                diagonal=1,
-            )
+            # Causal mask aligned to the end: query i (absolute pos offset+i) attends key j<=offset+i.
+            # Bool mask semantics: True = allowed to attend.
+            offset = seq_len_kv - seq_len_q
+            q_idx = torch.arange(seq_len_q, device=q.device).unsqueeze(1) + offset
+            k_idx = torch.arange(seq_len_kv, device=q.device).unsqueeze(0)
+            allowed = k_idx <= q_idx
             out = F.scaled_dot_product_attention(
-                q_t, k_t, v_t, attn_mask=attn_mask_causal, dropout_p=self.dropout if self.training else 0.0
+                q_t, k_t, v_t, attn_mask=allowed, dropout_p=self.dropout if self.training else 0.0
             )
             out = out.transpose(1, 2).contiguous().view(batch_size, seq_len_q, self.hidden_size)
 
         out = self.out_proj(out)
-        return out, None
+        return out, present
 
 
 class HybridBlock(nn.Module):
@@ -117,17 +128,17 @@ class HybridBlock(nn.Module):
             nn.Dropout(config.dropout),
         )
 
-    def forward(self, x, gru_hidden=None, mask=None):
+    def forward(self, x, gru_hidden=None, past_kv=None, use_cache=False):
         # 1. GRU (Sequential/Local Refinement - Pre-Attention)
         residual = x
         x = self.ln_1(x)
         gru_output, gru_hidden = self.gru(x, gru_hidden)
         x = residual + gru_output
 
-        # 2. Multi-Head Attention (Global Context) - Flash Attention
+        # 2. Multi-Head Attention (Global Context) - Flash Attention + KV-cache
         residual = x
         x = self.ln_2(x)
-        attn_output, _ = self.attn(x, x, x, attn_mask=mask)
+        attn_output, present = self.attn(x, x, x, past_kv=past_kv, use_cache=use_cache)
         x = residual + attn_output
 
         # 3. Feed Forward (Feature Refinement)
@@ -135,7 +146,7 @@ class HybridBlock(nn.Module):
         x = self.ln_3(x)
         x = residual + self.mlp(x)
 
-        return x, gru_hidden
+        return x, gru_hidden, present
 
 
 class HybridModel(PreTrainedModel):
@@ -189,28 +200,51 @@ class HybridModel(PreTrainedModel):
                 elif 'bias' in name:
                     torch.nn.init.zeros_(param)
 
-    def forward(self, input_ids, labels=None, gru_hidden_states=None):
+    def forward(
+        self,
+        input_ids,
+        labels=None,
+        gru_hidden_states=None,
+        past_key_values=None,
+        use_cache=False,
+    ):
         batch_size, seq_length = input_ids.shape
         device = input_ids.device
 
+        # Absolute position offset from cached length (incremental decoding)
+        past_length = (
+            past_key_values[0][0].shape[1]
+            if past_key_values is not None and past_key_values[0] is not None
+            else 0
+        )
+
         # Embeddings
-        positions = torch.arange(0, seq_length, device=device).unsqueeze(0)
+        positions = torch.arange(
+            past_length, past_length + seq_length, device=device
+        ).unsqueeze(0)
         x = self.embeddings(input_ids) + self.pos_embeddings(positions)
         x = self.dropout(x)
 
-        # Use the pre-computed mask, sliced to current sequence length
-        mask = self.causal_mask[:seq_length, :seq_length]
-
-        # Initialize persistent GRU hidden states if not provided
+        # Initialize persistent GRU + KV states if not provided
         if gru_hidden_states is None:
             gru_hidden_states = [None] * len(self.blocks)
+        if past_key_values is None:
+            past_key_values = [None] * len(self.blocks)
 
         new_gru_hidden_states = []
+        new_key_values = [] if use_cache else None
 
-        # Hybrid blocks with persistent hidden states
+        # Hybrid blocks with persistent hidden states + KV-cache
         for i, block in enumerate(self.blocks):
-            x, new_hidden = block(x, gru_hidden=gru_hidden_states[i], mask=mask)
+            x, new_hidden, present = block(
+                x,
+                gru_hidden=gru_hidden_states[i],
+                past_kv=past_key_values[i],
+                use_cache=use_cache,
+            )
             new_gru_hidden_states.append(new_hidden)
+            if use_cache:
+                new_key_values.append(present)
 
         self.gru_hidden_states = new_gru_hidden_states
 
@@ -226,9 +260,13 @@ class HybridModel(PreTrainedModel):
                 shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1)
             )
 
-        return (
-            {"loss": loss, "logits": logits} if loss is not None else {"logits": logits}
-        )
+        out = {"logits": logits}
+        if loss is not None:
+            out["loss"] = loss
+        if use_cache:
+            out["past_key_values"] = new_key_values
+            out["gru_hidden_states"] = new_gru_hidden_states
+        return out
 
     @torch.no_grad()
     def generate(self, input_ids, max_new_tokens, temperature=1.0, top_k=None):
@@ -236,11 +274,23 @@ class HybridModel(PreTrainedModel):
         Greedy/Top-k generation helper for inference.
         """
         self.eval()
-        for _ in range(max_new_tokens):
-            # Truncate input to max context length
-            input_cond = input_ids[:, -self.config.max_position_embeddings :]
 
-            outputs = self(input_cond)
+        # Prefill: process the full prompt once, then decode token-by-token from cache.
+        input_cond = input_ids[:, -self.config.max_position_embeddings :]
+        past_key_values = None
+        gru_hidden_states = None
+        next_input = input_cond
+
+        for _ in range(max_new_tokens):
+            outputs = self(
+                next_input,
+                past_key_values=past_key_values,
+                gru_hidden_states=gru_hidden_states,
+                use_cache=True,
+            )
+            past_key_values = outputs["past_key_values"]
+            gru_hidden_states = outputs["gru_hidden_states"]
+
             logits = outputs["logits"][:, -1, :] / temperature
 
             if top_k is not None:
@@ -251,5 +301,7 @@ class HybridModel(PreTrainedModel):
             next_token = torch.multinomial(probs, num_samples=1)
 
             input_ids = torch.cat((input_ids, next_token), dim=1)
+            # Only the new token flows through the next step; cache holds the rest.
+            next_input = next_token
 
         return input_ids
