@@ -1,6 +1,8 @@
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
@@ -11,6 +13,30 @@ from app.chat.chat import ChatService
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+# Persist every prompt/response pair to JSONL for later analysis/reports.
+HISTORY_PATH = Path(os.getenv("CHAT_HISTORY_PATH", ".output/chat_history.jsonl"))
+
+
+def _log_interaction(request: "ChatRequest", response: str) -> None:
+    """Appends one prompt/response record to the JSONL history file."""
+    try:
+        HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "prompt": request.prompt,
+            "response": response,
+            "params": {
+                "max_tokens": request.max_tokens,
+                "temperature": request.temperature,
+                "top_k": request.top_k,
+            },
+        }
+        with HISTORY_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        # Persistence is non-critical; never break the response over a log failure.
+        logger.warning(f"Failed to persist chat history: {e}")
 
 chat_service = ChatService(
     checkpoint_path=Path(os.getenv("CHECKPOINT_PATH", ".output/checkpoint.pt"))
@@ -67,10 +93,22 @@ async def generate_chat_response(request: ChatRequest):
             temperature=request.temperature,
             top_k=request.top_k
         )
+        _log_interaction(request, response_text)
         return ChatResponse(response=response_text)
     except Exception as e:
         logger.error(f"Error generating response: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/history")
+async def get_history(limit: int = 100):
+    """Returns the most recent persisted prompt/response interactions."""
+    if not HISTORY_PATH.exists():
+        return {"count": 0, "interactions": []}
+    with HISTORY_PATH.open(encoding="utf-8") as f:
+        lines = [line for line in f if line.strip()]
+    records = [json.loads(line) for line in lines[-limit:]]
+    return {"count": len(records), "interactions": records}
+
 
 @app.get("/health")
 async def health_check():
