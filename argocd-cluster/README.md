@@ -85,7 +85,7 @@ Si no deseas publicar tu código en un repositorio público/privado de GitHub pe
    ```bash
    git daemon --base-path=/Users/guille/Documents/GITHUB --export-all --reuseaddr --verbose
    ```
-   *Nota: Mantén esta terminal abierta. Esto permite que el clúster acceda a tu carpeta local usando `git://host.docker.internal/tfm_slm`.*
+   *Nota: Mantén esta terminal abierta. Esto permite que el clúster acceda a tu carpeta local usando `git://host.docker.internal/tfm-slm`.*
 
 2. **Confirmar los cambios localmente en Git:**
    Asegúrate de hacer un commit local para que el servidor Git detecte las últimas modificaciones del código:
@@ -115,7 +115,7 @@ Si no deseas publicar tu código en un repositorio público/privado de GitHub pe
    ```
 
 6. **Desplegar la Aplicación en ArgoCD:**
-   Aplica el manifiesto de la aplicación (que ya viene preconfigurado con `git://host.docker.internal/tfm_slm`):
+   Aplica el manifiesto de la aplicación (que ya viene preconfigurado con `git://host.docker.internal/tfm-slm`):
    ```bash
    kubectl apply -f argocd-cluster/application.yaml
    ```
