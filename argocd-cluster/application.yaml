@@ -8,7 +8,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: 'git://host.docker.internal/tfm_slm' # Servido localmente por tu Mac via Git Daemon
+    repoURL: 'git://host.docker.internal/tfm-slm' # Servido localmente por tu Mac via Git Daemon
     targetRevision: HEAD
     path: argocd-cluster/manifests
   destination:
