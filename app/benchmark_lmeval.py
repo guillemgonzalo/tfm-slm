@@ -11,6 +11,7 @@ is the prediction; accuracy is computed against the gold label.
 
 import json
 import logging
+import re
 from pathlib import Path
 
 import boto3
@@ -22,9 +23,26 @@ from app.model.architecture import HybridConfig, HybridModel
 from datasets import load_dataset
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 MAX_CONTEXT_TOKENS = 1024
+LOG_PATH = Path(".output/log_benchmark_lmeval.log")
+
+
+def _setup_logging():
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=[logging.StreamHandler(), logging.FileHandler(LOG_PATH)],
+    )
+
+
+def _hellaswag_preprocess(text: str) -> str:
+    """Matches lm-evaluation-harness hellaswag cleanup: strip bracketed tags/noise."""
+    text = text.strip()
+    text = text.replace(" [title]", ". ")
+    text = re.sub(r"\[.*?\]", "", text)
+    text = text.replace("  ", " ")
+    return text
 
 
 class LMEvalBenchmark:
@@ -58,8 +76,9 @@ class LMEvalBenchmark:
                 logger.info("Checkpoint downloaded from S3")
             except Exception as e:
                 raise FileNotFoundError(
-                    f"Checkpoint not found locally or in S3 ({settings.checkpoint_bucket}): {e}"
-                )
+                    f"Checkpoint not found locally or in S3 "
+                    f"({settings.checkpoint_bucket}): {e}"
+                ) from e
 
         checkpoint = torch.load(self.checkpoint_path, map_location=self.device)
 
@@ -80,7 +99,7 @@ class LMEvalBenchmark:
 
     @torch.no_grad()
     def _choice_logprob(self, context: str, choice: str) -> float:
-        """Sum of log-probs of `choice` tokens conditioned on `context`, averaged per token."""
+        """Log-probs of `choice` tokens conditioned on `context`, averaged per token."""
         context_ids = self.tokenizer.encode(context)
         choice_ids = self.tokenizer.encode(choice)
         if len(choice_ids) == 0:
@@ -106,24 +125,30 @@ class LMEvalBenchmark:
         return int(torch.tensor(scores).argmax().item())
 
     def run_hellaswag(self, limit: int | None = None) -> dict:
-        ds = load_dataset("hellaswag", split="validation", trust_remote_code=settings.trust_remote_code)
+        ds = load_dataset("hellaswag", split="validation")
         if limit:
             ds = ds.select(range(min(limit, len(ds))))
 
         correct = 0
         for i, ex in enumerate(ds):
-            context = ex["ctx"]
-            choices = ex["endings"]
+            ctx = ex["ctx_a"] + " " + ex["ctx_b"].capitalize()
+            context = _hellaswag_preprocess(f"{ex['activity_label']}: {ctx}")
+            choices = [_hellaswag_preprocess(ending) for ending in ex["endings"]]
             label = int(ex["label"])
             pred = self._score_example(context, choices)
             correct += int(pred == label)
             if (i + 1) % 50 == 0:
-                logger.info(f"HellaSwag [{i + 1}/{len(ds)}] running acc: {correct / (i + 1) * 100:.2f}%")
+                acc = correct / (i + 1) * 100
+                logger.info(f"HellaSwag [{i + 1}/{len(ds)}] running acc: {acc:.2f}%")
 
-        return {"task": "hellaswag", "num_examples": len(ds), "accuracy_percent": round(correct / len(ds) * 100, 2)}
+        return {
+            "task": "hellaswag",
+            "num_examples": len(ds),
+            "accuracy_percent": round(correct / len(ds) * 100, 2),
+        }
 
     def run_arc(self, subset: str = "ARC-Easy", limit: int | None = None) -> dict:
-        ds = load_dataset("ai2_arc", subset, split="test", trust_remote_code=settings.trust_remote_code)
+        ds = load_dataset("ai2_arc", subset, split="test")
         if limit:
             ds = ds.select(range(min(limit, len(ds))))
 
@@ -141,12 +166,19 @@ class LMEvalBenchmark:
             correct += int(pred == label)
             total += 1
             if (i + 1) % 50 == 0:
-                logger.info(f"{subset} [{i + 1}/{len(ds)}] running acc: {correct / total * 100:.2f}%")
+                acc = correct / total * 100
+                logger.info(f"{subset} [{i + 1}/{len(ds)}] running acc: {acc:.2f}%")
 
-        return {"task": subset, "num_examples": total, "accuracy_percent": round(correct / total * 100, 2)}
+        return {
+            "task": subset,
+            "num_examples": total,
+            "accuracy_percent": round(correct / total * 100, 2),
+        }
 
     def run_piqa(self, limit: int | None = None) -> dict:
-        ds = load_dataset("piqa", split="validation", trust_remote_code=settings.trust_remote_code)
+        ds = load_dataset(
+            "ybisk/piqa", split="validation", revision="refs/convert/parquet"
+        )
         if limit:
             ds = ds.select(range(min(limit, len(ds))))
 
@@ -158,9 +190,14 @@ class LMEvalBenchmark:
             pred = self._score_example(context, choices)
             correct += int(pred == label)
             if (i + 1) % 50 == 0:
-                logger.info(f"PIQA [{i + 1}/{len(ds)}] running acc: {correct / (i + 1) * 100:.2f}%")
+                acc = correct / (i + 1) * 100
+                logger.info(f"PIQA [{i + 1}/{len(ds)}] running acc: {acc:.2f}%")
 
-        return {"task": "piqa", "num_examples": len(ds), "accuracy_percent": round(correct / len(ds) * 100, 2)}
+        return {
+            "task": "piqa",
+            "num_examples": len(ds),
+            "accuracy_percent": round(correct / len(ds) * 100, 2),
+        }
 
     def run_all(self, limit: int | None = None) -> dict:
         results = {
@@ -177,11 +214,18 @@ class LMEvalBenchmark:
             logger.info(f"Running {name}...")
             result = fn()
             results["tasks"][name] = result
-            logger.info(f"{name}: {result['accuracy_percent']:.2f}% ({result['num_examples']} examples)")
+            acc = result["accuracy_percent"]
+            n = result["num_examples"]
+            logger.info(f"{name}: {acc:.2f}% ({n} examples)")
 
         return results
 
-    def save_results(self, results: dict, output_path: str = ".output/benchmark_lmeval.json", upload_s3: bool = True):
+    def save_results(
+        self,
+        results: dict,
+        output_path: str = ".output/benchmark_lmeval.json",
+        upload_s3: bool = True,
+    ):
         output_dir = Path(output_path).parent
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -192,13 +236,16 @@ class LMEvalBenchmark:
         if upload_s3:
             try:
                 s3_key = Path(output_path).name
-                self.s3_client.upload_file(output_path, settings.benchmark_bucket, s3_key)
+                self.s3_client.upload_file(
+                    output_path, settings.benchmark_bucket, s3_key
+                )
                 logger.info(f"Uploaded to S3: s3://{settings.benchmark_bucket}/{s3_key}")
             except Exception as e:
                 logger.warning(f"Failed to upload to S3 (non-critical): {e}")
 
 
 def main():
+    _setup_logging()
     benchmark = LMEvalBenchmark()
     results = benchmark.run_all()
     benchmark.save_results(results)
