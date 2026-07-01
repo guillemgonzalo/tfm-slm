@@ -5,8 +5,8 @@ tfm-slm es un modelo de lenguaje de escala reducida (Small Language Model) desar
 ## Características Principales
 
 *   Arquitectura Híbrida Integrada: 12 capas compuestas por bloques híbridos (HybridBlock) que fusionan Multi-Head Attention y GRU.
-*   Eficiencia en Parámetros: Configuración de aproximadamente 124M de parámetros con implementación de Weight Tying entre embeddings y la cabeza de salida.
-*   Entrenamiento de Alto Rendimiento: Soporte nativo para precisión bfloat16 y aceleración de matmuls mediante TF32, optimizado para NVIDIA RTX PRO 6000 (Arquitectura Ampere).
+*   Eficiencia en Parámetros: Configuración de aproximadamente 167M de parámetros con implementación de Weight Tying entre embeddings y la cabeza de salida.
+*   Entrenamiento de Alto Rendimiento: Soporte nativo para precisión bfloat16 y aceleración de matmuls mediante TF32, optimizado para NVIDIA RTX PRO 6000 (Arquitectura Blackwell).
 *   Pipeline de Datos Profesional: Servicios desacoplados siguiendo principios SOLID, utilizando el formato Apache Arrow para una gestión eficiente de la memoria mediante memory-mapping.
 *   MLOps Determinista: Entornos reproducibles mediante el gestor uv, construcción de contenedores optimizada con caché global y CI/CD dirigido por Pull Requests.
 
@@ -69,10 +69,15 @@ service.train(
 
 ## Estrategia de Mezcla de Datos (Data Mixing)
 
-El modelo utiliza una combinación estratégica de cinco pilares de datos abiertos:
+El modelo utiliza una combinación estratégica de cuatro pilares de datos abiertos:
 *   Conversacional (50%): OpenAssistant y UltraChat, para asegurar naturalidad en el diálogo y consistencia en contextos largos.
 *   Instrucciones (50%): Alpaca y ShareGPT, enfocados en dotar al modelo de capacidades resolutivas y seguimiento de instrucciones.
-*   Especializado: Subconjunto de The Stack (YAML) para el conocimiento de sintaxis de infraestructura y flujos DevOps.
+
+### Split del Dataset
+
+El dataset combinado (~1M muestras) se divide en:
+*   **700K muestras**: entrenamiento (primeras 700K del dataset mezclado).
+*   **300K muestras**: validación y benchmarking (últimas 300K, no vistas durante el entrenamiento).
 
 ## Instalación y Uso
 
@@ -157,9 +162,12 @@ ssh -i "tfm-slm.pem" ec2-user@<IP> tail -f /var/log/user-data.log
     *   training/: Servicio de entrenamiento optimizado para NVIDIA RTX PRO 6000 con gradient clipping y validación.
     *   dataset/: Servicios de adquisición, armonización y mezcla de datos.
     *   utils/: Herramientas de análisis (HybridArchitectureAnalyzer).
-    *   chat/: Interfaz de chat interactivo post-entrenamiento.
+    *   chat/: Interfaz de chat interactivo post-entrenamiento (API REST).
     *   terraform/: Configuración IaC para AWS (EC2, S3, ECR).
-*   tests/: Suite de tests (main, architecture).
+    *   inference.py: Entry point de inferencia — carga checkpoint desde S3 y lanza sesión de chat.
+    *   ask_chat.py: Cliente HTTP que lanza 10 preguntas de prueba al API del chat (requiere `kubectl port-forward`).
+    *   benchmarking.py: Evaluación completa del modelo sobre las 300K muestras de validación — exporta métricas a `.output/benchmark_hybrid.json`.
+*   tests/: Suite de tests (main, architecture, dataset).
 *   deploy.py: Script local para upload código a S3 y build Docker en ECR.
 
 ## Testing y Validación
@@ -167,8 +175,49 @@ ssh -i "tfm-slm.pem" ec2-user@<IP> tail -f /var/log/user-data.log
 Tests compartimentalizados:
 *   `tests/test_main.py`: Tests de orquestación de servicios.
 *   `tests/test_architecture.py`: 7 tests de arquitectura híbrida (hidden states, gradient flow, componentes).
+*   `tests/dataset/test_dataset_downloader.py`: Tests del pipeline de descarga de datasets.
 
 Ejecutar todo:
 ```bash
 uv run pytest tests/ -v
+```
+
+## Benchmarking
+
+Evaluación sobre 300K muestras de validación (no vistas durante el entrenamiento) en NVIDIA RTX PRO 6000:
+
+```bash
+uv run python app/benchmarking.py
+# Genera .output/benchmark_hybrid.json y sube a S3
+```
+
+### Resultados (`benchmark_hybrid.json`)
+
+| Métrica | Valor |
+|---|---|
+| Loss (Cross-Entropy) | 1.0911 |
+| Perplexity | 2.98 |
+| Token Accuracy (Top-1) | 79.75% |
+| Top-5 Accuracy | 91.14% |
+| Top-10 Accuracy | 93.56% |
+| Latencia por token | 7.00 ms |
+| Throughput (batch) | 90,268 tokens/s |
+| Throughput (single token) | 143 tokens/s |
+| Parámetros totales | 166,980,864 (~167M) |
+| Tamaño del modelo | 636.98 MB |
+| Memoria pico (VRAM) | 66.76 GB |
+| Tiempo total evaluación | 3,399.88 s (~56 min) |
+
+### Prueba del API de Chat
+
+Con el servicio desplegado en Kubernetes, `ask_chat.py` lanza 10 preguntas de prueba al endpoint:
+
+```bash
+# Exponer el servicio localmente
+kubectl port-forward svc/tfm-slm-chat-service -n tfm-slm 8000:8000
+
+# En otra terminal, lanzar las preguntas de prueba
+uv run python app/ask_chat.py
+# También acepta variable de entorno:
+# CHAT_URL=http://localhost:8000 uv run python app/ask_chat.py
 ```
