@@ -23,6 +23,7 @@ tfm-slm = "app.main:main"
 tfm-slm-inference = "app.inference:main"
 tfm-slm-api = "app.chat.api:main"
 tfm-slm-benchmark = "app.benchmarking:main"
+tfm-slm-benchmark-lmeval = "app.benchmark_lmeval:main"
 tfm-slm-deploy = "deploy:main"
 
 
