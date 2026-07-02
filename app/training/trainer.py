@@ -9,7 +9,7 @@ from app.config import settings
 from app.model.architecture import HybridConfig, HybridModel
 from app.utils.analyzer import HybridArchitectureAnalyzer
 from botocore.exceptions import ClientError
-from datasets import load_from_disk
+from datasets import DatasetDict, load_from_disk
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -110,9 +110,12 @@ class TrainingService:
                 f"Dataset not found at {self.dataset_path}. Run processing first."
             )
 
-        # 1. Load Pre-tokenized Dataset
+        # 1. Load Pre-tokenized Dataset (train split only — the benchmark
+        # split is held out entirely, see app/dataset/processor.py and
+        # app/benchmarking.py)
         logger.info(f"Loading pre-tokenized dataset from {self.dataset_path}...")
-        tokenized_ds = load_from_disk(str(self.dataset_path))
+        dataset = load_from_disk(str(self.dataset_path))
+        tokenized_ds = dataset["train"] if isinstance(dataset, DatasetDict) else dataset
         tokenized_ds.set_format("torch")
 
         # 2. Optimized DataLoader

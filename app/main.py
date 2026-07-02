@@ -29,7 +29,7 @@ def main():
         # 3. Dataset Processing Service
         logger.info("Processing and mixing datasets...")
         processor = DatasetProcessor()
-        processor.process(total_samples=700000)
+        processor.process(total_samples=494_876, benchmark_samples=148_437)
 
         # 4. Tokenizer Service — save locally before upload (included in tar)
         tokenizer_service = TokenizerService()

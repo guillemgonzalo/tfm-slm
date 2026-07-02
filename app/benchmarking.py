@@ -1,6 +1,6 @@
 """
 Benchmarking script for Hybrid Transformer-GRU model.
-Evaluates on validation set (300K samples).
+Evaluates on the dedicated 'benchmark' split (148,437 samples), a real holdout disjoint from training.
 Exports: loss, perplexity, throughput (tokens/sec), memory usage.
 """
 
@@ -16,7 +16,7 @@ from app.config import settings
 from app.dataset.cache import DatasetCacheService
 from app.dataset.tokenizer import TokenizerService
 from app.model.architecture import HybridConfig, HybridModel
-from datasets import load_from_disk
+from datasets import DatasetDict, load_from_disk
 from torch.utils.data import DataLoader
 
 logger = logging.getLogger(__name__)
@@ -76,8 +76,13 @@ class HybridBenchmark:
         logger.info(f"Model loaded from {self.checkpoint_path}")
         return model
 
-    def _load_validation_data(self, dataset_path: str = ".datasets/mixed_dataset", max_samples: int = 300000):
-        """Load validation set from local or S3 (using DatasetCacheService)."""
+    def _load_validation_data(self, dataset_path: str = ".datasets/mixed_dataset", max_samples: int = 148_437):
+        """Load the dedicated 'benchmark' split from local or S3 (using DatasetCacheService).
+
+        This split is produced by DatasetProcessor.process as a fixed holdout,
+        disjoint from the 'train' split consumed by TrainingService — genuinely
+        unseen during training.
+        """
         dataset_path_obj = Path(dataset_path)
 
         # Use DatasetCacheService to download from S3 if needed
@@ -91,14 +96,21 @@ class HybridBenchmark:
                     f"Dataset not found locally at {dataset_path} and not available in S3 bucket {settings.dataset_bucket}"
                 )
 
-        ds = load_from_disk(dataset_path)
-        ds.set_format("torch")
+        dataset = load_from_disk(dataset_path)
 
-        # Use last max_samples for validation (unseen during training)
-        if len(ds) > max_samples:
-            ds = ds.select(range(len(ds) - max_samples, len(ds)))
+        if isinstance(dataset, DatasetDict) and "benchmark" in dataset:
+            ds = dataset["benchmark"]
         else:
-            logger.warning(f"Dataset has only {len(ds)} samples, using all for validation")
+            raise ValueError(
+                f"Dataset at {dataset_path} has no 'benchmark' split. "
+                "Re-run DatasetProcessor.process to generate a train/benchmark split."
+            )
+
+        ds.set_format("torch")
+        if len(ds) > max_samples:
+            ds = ds.select(range(max_samples))
+        elif len(ds) < max_samples:
+            logger.warning(f"Benchmark split has only {len(ds)} samples, using all")
 
         # Batch size: 16 for MPS (Mac), 64 for CUDA
         batch_size = 16 if self.device.type == "mps" else 64
@@ -109,10 +121,14 @@ class HybridBenchmark:
             pin_memory=True if self.device.type != "mps" else False,
             num_workers=0 if self.device.type == "mps" else 4,
         )
-        logger.info(f"Loaded {len(ds)} validation samples")
+        logger.info(f"Loaded {len(ds)} benchmark samples")
         return dataloader
 
-    def benchmark(self, dataset_path: str = ".datasets/mixed_dataset", max_samples: int = 300000):
+    def benchmark(
+        self,
+        dataset_path: str = ".datasets/mixed_dataset",
+        max_samples: int = 148_437,
+    ):
         """Run comprehensive benchmarking with 10 metrics."""
         model = self._load_model()
         dataloader = self._load_validation_data(dataset_path, max_samples)
@@ -304,7 +320,7 @@ class HybridBenchmark:
 
 def main():
     benchmark = HybridBenchmark()
-    results = benchmark.benchmark(max_samples=300000)
+    results = benchmark.benchmark(max_samples=148_437)
     benchmark.save_results(results)
 
 
