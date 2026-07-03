@@ -138,7 +138,7 @@ docker run --gpus all -it \
 4. Escribe `salir` / `exit` / `quit` para terminar
 
 ## 7. Benchmarking (Evaluación de Checkpoint)
-*Evalúa checkpoint en 300K samples, exporta métricas (loss, perplexity, throughput).*
+*Evalúa checkpoint en el split `benchmark` (148,437 samples, holdout disjunto de train), exporta métricas (loss, perplexity, throughput).*
 
 ### Local (Mac)
 ```bash
