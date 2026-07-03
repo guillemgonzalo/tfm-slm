@@ -69,15 +69,17 @@ service.train(
 
 ## Estrategia de Mezcla de Datos (Data Mixing)
 
-El modelo utiliza una combinación estratégica de cuatro pilares de datos abiertos:
-*   Conversacional (50%): OpenAssistant y UltraChat, para asegurar naturalidad en el diálogo y consistencia en contextos largos.
-*   Instrucciones (50%): Alpaca y ShareGPT, enfocados en dotar al modelo de capacidades resolutivas y seguimiento de instrucciones.
+El modelo utiliza una combinación estratégica de cuatro fuentes de datos abiertos, ponderadas como sigue:
+*   OpenAssistant (30%) y UltraChat (30%): naturalidad en el diálogo y consistencia en contextos largos.
+*   Alpaca (20%) y ShareGPT (20%): capacidades resolutivas y seguimiento de instrucciones.
+
+UltraChat actúa como fuente elástica: al tener más de 1.4M de filas disponibles, absorbe el déficit que dejan las fuentes de tamaño fijo (p. ej. Alpaca solo tiene 52,002 filas en total) para que el total siga alcanzando `total_samples`.
 
 ### Split del Dataset
 
-El dataset combinado (~1M muestras) se divide en:
-*   **700K muestras**: entrenamiento (primeras 700K del dataset mezclado).
-*   **300K muestras**: validación y benchmarking (últimas 300K, no vistas durante el entrenamiento).
+El dataset combinado (494,876 muestras) se divide en dos splits disjuntos:
+*   **346,439 muestras** (`train`): entrenamiento.
+*   **148,437 muestras** (`benchmark`): holdout fijo, no visto durante el entrenamiento, usado para benchmarking.
 
 ## Instalación y Uso
 
@@ -184,7 +186,7 @@ uv run pytest tests/ -v
 
 ## Benchmarking
 
-Evaluación sobre 300K muestras de validación (no vistas durante el entrenamiento) en NVIDIA RTX PRO 6000:
+Evaluación sobre el split `benchmark` (148,437 muestras), holdout fijo disjunto del `train` y no visto durante el entrenamiento, en NVIDIA RTX PRO 6000:
 
 ```bash
 uv run python app/benchmarking.py
@@ -195,18 +197,18 @@ uv run python app/benchmarking.py
 
 | Métrica | Valor |
 |---|---|
-| Loss (Cross-Entropy) | 1.0911 |
-| Perplexity | 2.98 |
-| Token Accuracy (Top-1) | 79.75% |
-| Top-5 Accuracy | 91.14% |
-| Top-10 Accuracy | 93.56% |
+| Loss (Cross-Entropy) | 1.6008 |
+| Perplexity | 4.96 |
+| Token Accuracy (Top-1) | 68.25% |
+| Top-5 Accuracy | 82.65% |
+| Top-10 Accuracy | 86.82% |
 | Latencia por token | 7.00 ms |
-| Throughput (batch) | 90,268 tokens/s |
+| Throughput (batch) | 90,267 tokens/s |
 | Throughput (single token) | 143 tokens/s |
 | Parámetros totales | 166,980,864 (~167M) |
 | Tamaño del modelo | 636.98 MB |
 | Memoria pico (VRAM) | 66.76 GB |
-| Tiempo total evaluación | 3,399.88 s (~56 min) |
+| Tiempo total evaluación | 1,682.24 s (~28 min) |
 
 ### Prueba del API de Chat
 
