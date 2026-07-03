@@ -38,8 +38,8 @@ Se han aplicado **10 mejoras críticas** a la arquitectura híbrida para mejorar
 ### Optimizaciones de Rendimiento
 7. **Flash Attention** (`app/model/architecture.py`): 
    - 2-3x speedup en GPUs NVIDIA modernas. Reduce memoria O(n²) → O(n).
-   - Instalación condicional: `flash-attn>=2.6.0; sys_platform == 'linux'` (solo AWS/Linux)
-   - Código ejecuta solo en AWS, no en Mac (solo edición)
+   - Import opcional (`try/except ImportError`): si `flash_attn` no está instalado, cae automáticamente a `F.scaled_dot_product_attention` con máscara causal.
+   - Instalado en el `Dockerfile` desde wheel pre-compilado (x86_64/Linux); en Mac no está disponible y se usa el fallback.
 8. **Learning Rate Scheduler** (`app/training/trainer.py`): Cosine annealing con warmup mejora convergencia 15% en épocas y +1-2% en accuracy.
 
 ### Herramientas Nuevas
@@ -123,12 +123,13 @@ cp app/terraform/terraform.tfvars.example app/terraform/terraform.tfvars
 # Editar terraform.tfvars: región, instance_type (g7e.2xlarge), ssh_key_name, etc.
 ```
 
-2. Deploy código a S3 (selecciona modo: train o inference):
+2. Deploy código a S3 (selecciona modo: train, inference o benchmark):
 ```bash
-echo "1" | python3 deploy.py    # 1=train, 2=inference
+echo "1" | python3 deploy.py    # 1=train, 2=inference, 3=benchmark
 # → Archiva código
 # → Sube ZIP a S3 bucket (tfm-slm-code)
 # → Verifica ECR repo
+# → Guarda deployment_mode en terraform.tfvars
 ```
 
 3. Crea infraestructura EC2 con GPU:
@@ -150,12 +151,35 @@ ssh -i "tfm-slm.pem" ec2-user@<IP> tail -f /var/log/user-data.log
 - Descarga código de S3 → `/home/ec2-user/tfm-slm`
 - **Modo Train**: buildea Docker (flash-attn compila con GPU) → pushea ECR → entrena (15 epochs ~2-4h)
 - **Modo Inference**: descarga imagen ECR → ejecuta chat interactivo
+- **Modo Benchmark**: descarga dataset (split `benchmark`) + checkpoint de S3 → ejecuta `tfm-slm-benchmark` → sube resultados a S3
 
 **Deploy.py archiva:**
 - `pyproject.toml`, `uv.lock`, `Dockerfile`, `entrypoint.sh`, `build-and-train.sh`, `app/` (sin __pycache__)
 - Excluye: `.git`, datasets, tests, documentación
 
 **Nota:** AWS credentials leídas automáticamente de `~/.aws/credentials`.
+
+### Deployment a Kubernetes local (ArgoCD/Kind, sin GitHub)
+
+Alternativa al flujo EC2 anterior: despliega el chat como servicio en un clúster de Kubernetes local (Kind), gestionado vía Kustomize o simulando GitOps con ArgoCD. Ver `argocd-cluster/README.md` para la guía completa paso a paso.
+
+```bash
+# Build de la imagen y creación del clúster local
+docker build -t tfm-slm:latest .
+kind create cluster --name tfm-cluster
+kind load docker-image tfm-slm:latest --name tfm-cluster
+kubectl create namespace tfm-slm
+
+# Despliegue directo con Kustomize (sin ArgoCD)
+kubectl apply -k argocd-cluster/manifests/
+
+# Copiar checkpoint local al pod y exponer el servicio
+kubectl cp .output/checkpoint.pt tfm-slm/<POD_NAME>:/app/data/checkpoint.pt
+kubectl rollout restart deployment/tfm-slm-chat -n tfm-slm
+kubectl port-forward svc/tfm-slm-chat-service -n tfm-slm 8000:8000
+```
+
+Expone una interfaz web en `http://localhost:8000` y el endpoint `POST /api/chat`.
 
 ## Estructura del Proyecto
 
@@ -168,7 +192,9 @@ ssh -i "tfm-slm.pem" ec2-user@<IP> tail -f /var/log/user-data.log
     *   terraform/: Configuración IaC para AWS (EC2, S3, ECR).
     *   inference.py: Entry point de inferencia — carga checkpoint desde S3 y lanza sesión de chat.
     *   ask_chat.py: Cliente HTTP que lanza 10 preguntas de prueba al API del chat (requiere `kubectl port-forward`).
-    *   benchmarking.py: Evaluación completa del modelo sobre las 300K muestras de validación — exporta métricas a `.output/benchmark_hybrid.json`.
+    *   benchmarking.py: Evaluación sobre el split `benchmark` (148,437 muestras) — exporta métricas a `.output/benchmark_hybrid.json`.
+    *   benchmark_lmeval.py: Benchmarks zero-shot de opción múltiple (HellaSwag, ARC-Easy, ARC-Challenge, PIQA) vía log-likelihood scoring, estilo lm-evaluation-harness.
+*   argocd-cluster/: Manifiestos de Kubernetes (Kustomize) y ArgoCD para desplegar el chat en un clúster local (Kind). Ver `argocd-cluster/README.md`.
 *   tests/: Suite de tests (main, architecture, dataset).
 *   deploy.py: Script local para upload código a S3 y build Docker en ECR.
 
