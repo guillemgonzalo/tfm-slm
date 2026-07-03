@@ -249,6 +249,3 @@ terraform.tfvars
 # Pytest
 .output/
 
-# Special Commands & Local Symlinks
-markdowns
-/markdowns/
