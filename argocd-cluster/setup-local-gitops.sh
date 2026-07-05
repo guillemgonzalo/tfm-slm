@@ -116,8 +116,17 @@ log "Aplicando Application de ArgoCD..."
 kubectl apply -f "$SCRIPT_DIR/application.yaml"
 
 # 9. Copiar checkpoint si existe
-log "Esperando pod del chatbot..."
-if kubectl wait --for=condition=ready --timeout=180s pod -l app=tfm-slm-chat -n "$APP_NAMESPACE" 2>/dev/null; then
+log "Esperando a que ArgoCD sincronice y cree el pod del chatbot..."
+POD_APPEARED=false
+for i in $(seq 1 60); do
+  if kubectl get pod -l app=tfm-slm-chat -n "$APP_NAMESPACE" 2>/dev/null | grep -q tfm-slm-chat; then
+    POD_APPEARED=true
+    break
+  fi
+  sleep 5
+done
+
+if $POD_APPEARED && kubectl wait --for=condition=ready --timeout=180s pod -l app=tfm-slm-chat -n "$APP_NAMESPACE" 2>/dev/null; then
   POD_NAME="$(kubectl get pods -n "$APP_NAMESPACE" -l app=tfm-slm-chat -o jsonpath='{.items[0].metadata.name}')"
   if [[ -f "$CHECKPOINT_PATH" ]]; then
     log "Copiando checkpoint ($CHECKPOINT_PATH) al pod $POD_NAME..."
