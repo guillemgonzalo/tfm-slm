@@ -80,6 +80,14 @@ kubectl apply -k manifests/
 ### Opción B: GitOps Simulado con ArgoCD en Local (Sin GitHub)
 Si no deseas publicar tu código en un repositorio público/privado de GitHub pero quieres simular el flujo GitOps, puedes arrancar un servidor Git local en tu propio Mac y hacer que ArgoCD lea de él:
 
+> **Atajo:** todos los pasos de esta sección (1-7) están automatizados en `argocd-cluster/setup-local-gitops.sh`. Ejecútalo con:
+> ```bash
+> ./argocd-cluster/setup-local-gitops.sh
+> ```
+> El script construye la imagen, crea el clúster kind, arranca el git daemon, instala ArgoCD, despliega la Application, copia `.output/checkpoint.pt` si existe, y deja expuestos `https://localhost:8080` (ArgoCD) y `http://localhost:8000` (chatbot) en background. Al terminar imprime la contraseña de admin. Para parar los procesos en background: `./argocd-cluster/setup-local-gitops.sh stop`.
+>
+> Los pasos manuales de abajo describen lo que hace el script, por si prefieres ejecutarlos uno a uno.
+
 1. **Iniciar el Git Daemon en tu Mac:**
    Abre una terminal nueva en tu Mac y arranca el servidor Git integrado:
    ```bash
