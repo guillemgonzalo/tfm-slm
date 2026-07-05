@@ -137,6 +137,12 @@ nohup kubectl port-forward svc/argocd-server -n "$ARGOCD_NAMESPACE" 8080:443 \
   > "$LOG_DIR/argocd-portforward.log" 2>&1 &
 echo $! > "$ARGOCD_PF_PID_FILE"
 
+log "Esperando a que exista el servicio tfm-slm-chat-service..."
+for i in $(seq 1 30); do
+  kubectl get svc tfm-slm-chat-service -n "$APP_NAMESPACE" >/dev/null 2>&1 && break
+  sleep 2
+done
+
 log "Exponiendo el chatbot en http://localhost:8000..."
 nohup kubectl port-forward svc/tfm-slm-chat-service -n "$APP_NAMESPACE" 8000:8000 \
   > "$LOG_DIR/chat-portforward.log" 2>&1 &
